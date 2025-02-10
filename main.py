@@ -163,7 +163,7 @@ def main():
     api_password = st.sidebar.text_input("API Password", type="password")
     
     st.sidebar.header("Task Settings")
-    depth = st.sidebar.number_input("Depth (number of reviews to fetch)", min_value=10, max_value=1000, value=100, step=10)
+    depth = st.sidebar.number_input("Depth (number of reviews to fetch)", min_value=10, max_value=10000, value=100, step=10)
     
     st.markdown("### Enter Your GBP Profiles")
     st.markdown("""
