@@ -98,6 +98,7 @@ def get_detailed_reviews_dataframe(results):
       - Timestamp (when the review was posted)
       - Profile Name (who posted the review)
       - Rating (the review's rating value)
+      - Review Body (the text content of the review)
     """
     detailed_rows = []
     for res in results:
@@ -117,12 +118,14 @@ def get_detailed_reviews_dataframe(results):
                     rating = ""
                     if item.get("rating") and isinstance(item["rating"], dict):
                         rating = item["rating"].get("value", "")
+                    review_body = item.get("review_text", "")
                     detailed_rows.append({
                         "Business": business,
                         "Location": location,
                         "Timestamp": timestamp,
                         "Profile Name": profile_name,
-                        "Rating": rating
+                        "Rating": rating,
+                        "Review Body": review_body
                     })
     if detailed_rows:
         return pd.DataFrame(detailed_rows)
@@ -151,7 +154,7 @@ def main():
            The API tasks are processed asynchronously and may take **2–5 minutes** (or longer if you set a high review depth).  
            The elapsed time is shown during processing.  
         4. **Results:**  
-           When complete, a summary table is displayed. You can also download detailed review data as a CSV file.
+           When complete, a summary table is displayed. You can also download detailed review data (including review text) as a CSV file.
     """)
     
     # Sidebar: API Credentials and Task Settings.
