@@ -1,36 +1,24 @@
 import time
 import streamlit as st
-from client import RestClient  # Make sure this file is in your working directory
+from client import RestClient  # Ensure client.py is in your repository
 
-def get_review_counts(api_login, api_password):
+def get_review_counts(api_login, api_password, tasks_list, depth=100):
     """
-    Post tasks to DataForSEO for the three Pella showrooms,
-    then poll for task completion and retrieve the results.
+    Build tasks from a list of dictionaries (each with 'keyword' and 'location_name'),
+    post them to DataForSEO, poll for completion, and retrieve the results.
     """
-    # Instantiate the REST client with provided credentials
+    # Instantiate the REST client using user-supplied credentials
     client = RestClient(api_login, api_password)
     
-    # Build POST data – one task per location.
-    # You may adjust "depth" (number of reviews to retrieve) as needed.
+    # Build the POST data dictionary from the user-provided tasks_list.
     post_data = {}
-    post_data[len(post_data)] = {
-        "keyword": "Pella Windows and Doors Showroom of Chesterfield, MO",
-        "location_name": "Chesterfield, MO, United States",
-        "language_name": "English",
-        "depth": 100  # adjust this value as needed
-    }
-    post_data[len(post_data)] = {
-        "keyword": "Pella Windows and Doors Showroom of Bentonville, AR",
-        "location_name": "Bentonville, AR, United States",
-        "language_name": "English",
-        "depth": 100
-    }
-    post_data[len(post_data)] = {
-        "keyword": "Pella Windows and Doors Showroom of North Little Rock, AR",
-        "location_name": "North Little Rock, AR, United States",
-        "language_name": "English",
-        "depth": 100
-    }
+    for idx, task in enumerate(tasks_list):
+        post_data[idx] = {
+            "keyword": task["keyword"],
+            "location_name": task["location_name"],
+            "language_name": "English",
+            "depth": depth  # Number of reviews to fetch; adjust as needed.
+        }
     
     st.write("**Setting tasks…**")
     response = client.post("/v3/business_data/google/reviews/task_post", post_data)
@@ -39,23 +27,23 @@ def get_review_counts(api_login, api_password):
         st.error("Error posting tasks. Code: {} Message: {}".format(
             response.get("status_code"), response.get("status_message")))
         return None
-
+    
     st.write("Tasks have been posted successfully.")
     
     # Poll for completed tasks.
     st.write("**Waiting for tasks to complete…**")
-    # In a production environment, you might want to add more robust timeout/retry logic.
+    # (In production, you might add more robust error handling or timeout logic.)
     while True:
         tasks_ready = client.get("/v3/business_data/google/reviews/tasks_ready")
         if (tasks_ready.get("status_code") == 20000 and
             tasks_ready.get("tasks_count", 0) >= len(post_data)):
             break
-        time.sleep(10)  # wait 10 seconds between polls
+        time.sleep(10)  # Wait 10 seconds between polls.
         st.write("Still waiting…")
     
     st.write("Tasks are ready. Retrieving results…")
     results = []
-    # Loop through each ready task, then for each task’s result entry, use the provided endpoint to get detailed results.
+    # Retrieve detailed results for each completed task.
     for task in tasks_ready.get("tasks", []):
         for resultTaskInfo in task.get("result", []):
             endpoint = resultTaskInfo.get("endpoint")
@@ -66,10 +54,11 @@ def get_review_counts(api_login, api_password):
 
 def parse_results(results):
     """
-    Parse each result to extract:
-      - The business name (echoed in the task's data)
-      - The listing review count (reviews_count)
-      - The number of reviews scraped (items_count)
+    Extract from each result:
+      - The business (GBP profile) name (from task data)
+      - The total reviews count as reported on the listing (reviews_count)
+      - The scraped reviews count (items_count)
+      - An indication if there’s a discrepancy.
     """
     parsed = []
     for res in results:
@@ -91,30 +80,71 @@ def parse_results(results):
     return parsed
 
 def main():
-    st.title("Google Reviews Checker for Pella Showrooms")
+    st.title("Google Reviews Checker for GBP Profiles")
     st.markdown("""
-        This self‐service app uses DataForSEO’s API to pull review counts for selected 
-        Pella Windows and Doors showrooms. It displays both the total reviews as reported 
-        on Google (the listing count) and the number of reviews scraped (the items count). 
-        Discrepancies between these numbers may indicate missing reviews.
+        This self-service app uses DataForSEO’s API to retrieve review counts for Google Business Profiles.
+        Enter your GBP details below to see both the total (listing) review count and the number of reviews scraped.
+        Discrepancies may indicate missing reviews.
     """)
 
     st.sidebar.header("DataForSEO API Credentials")
     api_login = st.sidebar.text_input("API Login", type="password")
     api_password = st.sidebar.text_input("API Password", type="password")
+    
+    st.sidebar.header("Task Settings")
+    depth = st.sidebar.number_input("Depth (number of reviews to fetch)", min_value=10, max_value=1000, value=100, step=10)
 
-    if st.sidebar.button("Run Review Check"):
+    st.markdown("### Enter Your GBP Profiles")
+    st.markdown("""
+        Enter one GBP profile per line in the format:
+        **Business Name, Location**
+        
+        For example:
+        ```
+        Pella Windows and Doors Showroom of Chesterfield, MO, United States
+        Pella Windows and Doors Showroom of Bentonville, AR, United States
+        ```
+        If you enter only a business name, a default location of 'United States' will be used.
+    """)
+    
+    profiles_input = st.text_area("GBP Profiles", height=150)
+    
+    if st.button("Run Review Check"):
         if not api_login or not api_password:
             st.error("Please enter your API credentials in the sidebar.")
-        else:
-            with st.spinner("Posting tasks and waiting for results…"):
-                results = get_review_counts(api_login, api_password)
-            if results is not None:
-                parsed = parse_results(results)
-                st.write("### Results")
-                st.table(parsed)
+            return
+        if not profiles_input.strip():
+            st.error("Please enter at least one GBP profile.")
+            return
+        
+        # Parse the input into a list of tasks.
+        tasks_list = []
+        lines = profiles_input.splitlines()
+        for line in lines:
+            if not line.strip():
+                continue
+            # Split the line by comma.
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2:
+                # If more than one comma is found, assume that all parts except the last form the business name.
+                keyword = ", ".join(parts[:-1])
+                location = parts[-1]
             else:
-                st.error("Failed to retrieve results.")
+                keyword = parts[0]
+                location = "United States"  # Default location if not specified.
+            tasks_list.append({
+                "keyword": keyword,
+                "location_name": location
+            })
+        
+        with st.spinner("Posting tasks and waiting for results…"):
+            results = get_review_counts(api_login, api_password, tasks_list, depth=depth)
+        if results is not None:
+            parsed = parse_results(results)
+            st.write("### Results")
+            st.table(parsed)
+        else:
+            st.error("Failed to retrieve results.")
 
 if __name__ == "__main__":
     main()
