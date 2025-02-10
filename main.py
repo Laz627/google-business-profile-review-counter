@@ -1,64 +1,67 @@
 import time
 import streamlit as st
-from client import RestClient  # Ensure client.py is in your repository
+from client import RestClient  # Ensure that client.py is in your repository
 
 def get_review_counts(api_login, api_password, tasks_list, depth=100):
     """
     Build tasks from a list of dictionaries (each with 'keyword' and 'location_name'),
-    post them to DataForSEO, poll for completion, and retrieve the results.
+    post them to DataForSEO, and then poll each task individually (using its ID)
+    until the result is available.
     """
-    # Instantiate the REST client using user-supplied credentials
     client = RestClient(api_login, api_password)
     
-    # Build the POST data dictionary from the user-provided tasks_list.
+    # Build the POST data from the tasks_list.
     post_data = {}
     for idx, task in enumerate(tasks_list):
         post_data[idx] = {
             "keyword": task["keyword"],
             "location_name": task["location_name"],
             "language_name": "English",
-            "depth": depth  # Number of reviews to fetch; adjust as needed.
+            "depth": depth
         }
-    
-    st.write("**Setting tasks…**")
+        
+    st.write("**Posting tasks...**")
     response = client.post("/v3/business_data/google/reviews/task_post", post_data)
-    
     if response.get("status_code") != 20000:
         st.error("Error posting tasks. Code: {} Message: {}".format(
             response.get("status_code"), response.get("status_message")))
         return None
     
-    st.write("Tasks have been posted successfully.")
+    # Extract task IDs from the response.
+    task_ids = []
+    for task in response.get("tasks", []):
+        task_id = task.get("id")
+        if task_id:
+            task_ids.append(task_id)
+    st.write("Task IDs:", task_ids)
     
-    # Poll for completed tasks.
-    st.write("**Waiting for tasks to complete…**")
-    # (In production, you might add more robust error handling or timeout logic.)
-    while True:
-        tasks_ready = client.get("/v3/business_data/google/reviews/tasks_ready")
-        if (tasks_ready.get("status_code") == 20000 and
-            tasks_ready.get("tasks_count", 0) >= len(post_data)):
-            break
-        time.sleep(10)  # Wait 10 seconds between polls.
-        st.write("Still waiting…")
-    
-    st.write("Tasks are ready. Retrieving results…")
-    results = []
-    # Retrieve detailed results for each completed task.
-    for task in tasks_ready.get("tasks", []):
-        for resultTaskInfo in task.get("result", []):
-            endpoint = resultTaskInfo.get("endpoint")
-            if endpoint:
-                res = client.get(endpoint)
-                results.append(res)
-    return results
+    # Poll each task individually using its task_get endpoint.
+    st.write("**Polling tasks for completion...**")
+    completed_results = {}
+    while len(completed_results) < len(task_ids):
+        for task_id in task_ids:
+            if task_id in completed_results:
+                continue  # Already completed
+            result = client.get("/v3/business_data/google/reviews/task_get/" + task_id)
+            if result.get("status_code") == 20000:
+                tasks_list_result = result.get("tasks", [])
+                if tasks_list_result:
+                    task_data = tasks_list_result[0]
+                    # Check if "result" exists and is non-empty.
+                    if task_data.get("result"):
+                        completed_results[task_id] = result
+                        st.write(f"Task {task_id} completed.")
+        if len(completed_results) < len(task_ids):
+            st.write("Waiting for remaining tasks...")
+            time.sleep(10)
+            
+    # Return the list of completed results.
+    return list(completed_results.values())
 
 def parse_results(results):
     """
-    Extract from each result:
-      - The business (GBP profile) name (from task data)
-      - The total reviews count as reported on the listing (reviews_count)
-      - The scraped reviews count (items_count)
-      - An indication if there’s a discrepancy.
+    Extract the business name (from task data), the total review count as reported
+    on Google (reviews_count), and the number of reviews scraped (items_count).
     """
     parsed = []
     for res in results:
@@ -86,14 +89,15 @@ def main():
         Enter your GBP details below to see both the total (listing) review count and the number of reviews scraped.
         Discrepancies may indicate missing reviews.
     """)
-
+    
+    # API Credentials in the sidebar.
     st.sidebar.header("DataForSEO API Credentials")
     api_login = st.sidebar.text_input("API Login", type="password")
     api_password = st.sidebar.text_input("API Password", type="password")
     
     st.sidebar.header("Task Settings")
     depth = st.sidebar.number_input("Depth (number of reviews to fetch)", min_value=10, max_value=1000, value=100, step=10)
-
+    
     st.markdown("### Enter Your GBP Profiles")
     st.markdown("""
         Enter one GBP profile per line in the format:
@@ -123,10 +127,9 @@ def main():
         for line in lines:
             if not line.strip():
                 continue
-            # Split the line by comma.
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 2:
-                # If more than one comma is found, assume that all parts except the last form the business name.
+                # If multiple commas are used, assume that all parts except the last form the business name.
                 keyword = ", ".join(parts[:-1])
                 location = parts[-1]
             else:
@@ -136,8 +139,8 @@ def main():
                 "keyword": keyword,
                 "location_name": location
             })
-        
-        with st.spinner("Posting tasks and waiting for results…"):
+            
+        with st.spinner("Posting tasks and waiting for results..."):
             results = get_review_counts(api_login, api_password, tasks_list, depth=depth)
         if results is not None:
             parsed = parse_results(results)
