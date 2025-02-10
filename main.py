@@ -38,6 +38,9 @@ def get_review_counts(api_login, api_password, tasks_list, depth=100):
     # Poll each task individually using its task_get endpoint.
     st.write("**Polling tasks for completion...**")
     completed_results = {}
+    start_time = time.time()
+    polling_status = st.empty()  # Container to update elapsed time
+    
     while len(completed_results) < len(task_ids):
         for task_id in task_ids:
             if task_id in completed_results:
@@ -51,8 +54,9 @@ def get_review_counts(api_login, api_password, tasks_list, depth=100):
                     if task_data.get("result"):
                         completed_results[task_id] = result
                         st.write(f"Task {task_id} completed.")
+        elapsed_time = int(time.time() - start_time)
+        polling_status.text(f"**Time elapsed:** {elapsed_time} seconds")
         if len(completed_results) < len(task_ids):
-            st.write("Waiting for remaining tasks...")
             time.sleep(10)
             
     # Return the list of completed results.
@@ -85,12 +89,28 @@ def parse_results(results):
 def main():
     st.title("Google Reviews Checker for GBP Profiles")
     st.markdown("""
-        This self-service app uses DataForSEO’s API to retrieve review counts for Google Business Profiles.
-        Enter your GBP details below to see both the total (listing) review count and the number of reviews scraped.
-        Discrepancies may indicate missing reviews.
+        **Overview:**  
+        This tool leverages the DataForSEO API to retrieve review counts for your Google Business Profiles.
+        It retrieves both the total review count (as listed on Google) and the number of reviews scraped from the page.
+        A discrepancy between these numbers may indicate that some reviews are not being captured.
+        
+        **How to Use:**  
+        1. **Enter Your DataForSEO Credentials** in the sidebar.  
+        2. **Enter GBP Profiles:** Provide one GBP profile per line in the format:  
+           **Business Name, Location**  
+           For example:  
+           ```
+           Pella Windows and Doors Showroom of Chesterfield, MO, United States
+           Pella Windows and Doors Showroom of Bentonville, AR, United States
+           ```  
+           *Make sure the business name matches the one used in your Google Business Profile for accurate results.*  
+        3. **Processing Time:**  
+           Please allow **2–5 minutes** (or longer if using a high depth value) for the tool to complete the review retrieval.  
+        4. **Results:**  
+           When complete, the results table will display the review counts and indicate any discrepancies.
     """)
     
-    # API Credentials in the sidebar.
+    # Sidebar API Credentials and Task Settings.
     st.sidebar.header("DataForSEO API Credentials")
     api_login = st.sidebar.text_input("API Login", type="password")
     api_password = st.sidebar.text_input("API Password", type="password")
@@ -100,15 +120,15 @@ def main():
     
     st.markdown("### Enter Your GBP Profiles")
     st.markdown("""
-        Enter one GBP profile per line in the format:
-        **Business Name, Location**
+        **Format:** One GBP profile per line in the format:  
+        **Business Name, Location**  
         
-        For example:
+        **Example:**  
         ```
         Pella Windows and Doors Showroom of Chesterfield, MO, United States
         Pella Windows and Doors Showroom of Bentonville, AR, United States
-        ```
-        If you enter only a business name, a default location of 'United States' will be used.
+        ```  
+        If you enter only a business name, a default location of 'United States' will be assumed.
     """)
     
     profiles_input = st.text_area("GBP Profiles", height=150)
@@ -129,7 +149,7 @@ def main():
                 continue
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 2:
-                # If multiple commas are used, assume that all parts except the last form the business name.
+                # If there are multiple commas, assume all parts except the last form the business name.
                 keyword = ", ".join(parts[:-1])
                 location = parts[-1]
             else:
@@ -139,7 +159,7 @@ def main():
                 "keyword": keyword,
                 "location_name": location
             })
-            
+        
         with st.spinner("Posting tasks and waiting for results..."):
             results = get_review_counts(api_login, api_password, tasks_list, depth=depth)
         if results is not None:
