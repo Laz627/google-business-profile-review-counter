@@ -1,6 +1,7 @@
 import time
 import streamlit as st
-from client import RestClient  # Ensure that client.py is in your repository
+import pandas as pd
+from client import RestClient  # Ensure that client.py (DataForSEO client) is in your repository
 
 def get_review_counts(api_login, api_password, tasks_list, depth=100):
     """
@@ -39,8 +40,7 @@ def get_review_counts(api_login, api_password, tasks_list, depth=100):
     st.write("**Polling tasks for completion...**")
     completed_results = {}
     start_time = time.time()
-    polling_status = st.empty()  # Container to update elapsed time
-    
+    polling_status = st.empty()  # Placeholder to update elapsed time
     while len(completed_results) < len(task_ids):
         for task_id in task_ids:
             if task_id in completed_results:
@@ -64,8 +64,11 @@ def get_review_counts(api_login, api_password, tasks_list, depth=100):
 
 def parse_results(results):
     """
-    Extract the business name (from task data), the total review count as reported
-    on Google (reviews_count), and the number of reviews scraped (items_count).
+    Create a summary list for each result that shows:
+      - Business (from the task 'keyword')
+      - Total Reviews (listing count from Google)
+      - Scraped Reviews (items count from the API response)
+      - Whether there is a discrepancy.
     """
     parsed = []
     for res in results:
@@ -86,13 +89,53 @@ def parse_results(results):
                 })
     return parsed
 
+def get_detailed_reviews_dataframe(results):
+    """
+    For each completed task result, extract the individual review items and build a DataFrame.
+    The DataFrame will include:
+      - Business (the 'keyword' from the task data)
+      - Location (the 'location_name' from the task data)
+      - Timestamp (when the review was posted)
+      - Profile Name (who posted the review)
+      - Rating (the review's rating value)
+    """
+    detailed_rows = []
+    for res in results:
+        if res.get("status_code") == 20000:
+            task_result = res.get("tasks", [])[0]
+            task_params = task_result.get("data", {})
+            business = task_params.get("keyword", "Unknown")
+            location = task_params.get("location_name", "Unknown")
+            results_array = task_result.get("result", [])
+            if results_array:
+                # Assume the first element contains aggregated data and individual reviews in "items"
+                review_info = results_array[0]
+                items = review_info.get("items", [])
+                for item in items:
+                    timestamp = item.get("timestamp", "")
+                    profile_name = item.get("profile_name", "")
+                    rating = ""
+                    if item.get("rating") and isinstance(item["rating"], dict):
+                        rating = item["rating"].get("value", "")
+                    detailed_rows.append({
+                        "Business": business,
+                        "Location": location,
+                        "Timestamp": timestamp,
+                        "Profile Name": profile_name,
+                        "Rating": rating
+                    })
+    if detailed_rows:
+        return pd.DataFrame(detailed_rows)
+    else:
+        return pd.DataFrame()
+
 def main():
     st.title("Google Reviews Checker for GBP Profiles")
     st.markdown("""
         **Overview:**  
-        This tool leverages the DataForSEO API to retrieve review counts for your Google Business Profiles.
-        It retrieves both the total review count (as listed on Google) and the number of reviews scraped from the page.
-        A discrepancy between these numbers may indicate that some reviews are not being captured.
+        This tool leverages the DataForSEO API to retrieve review counts and detailed review data for your Google Business Profiles (GBP).  
+        It shows both the total review count (as listed on Google) and the number of reviews scraped from the page.  
+        Additionally, you can download the individual review details as a CSV file for further analysis.  
         
         **How to Use:**  
         1. **Enter Your DataForSEO Credentials** in the sidebar.  
@@ -103,14 +146,15 @@ def main():
            Pella Windows and Doors Showroom of Chesterfield, MO, United States
            Pella Windows and Doors Showroom of Bentonville, AR, United States
            ```  
-           *Make sure the business name matches the one used in your Google Business Profile for accurate results.*  
+           *Ensure the business name is entered exactly as it appears in your Google Business Profile for accurate results.*  
         3. **Processing Time:**  
-           Please allow **2–5 minutes** (or longer if using a high depth value) for the tool to complete the review retrieval.  
+           The API tasks are processed asynchronously and may take **2–5 minutes** (or longer if you set a high review depth).  
+           The elapsed time is shown during processing.  
         4. **Results:**  
-           When complete, the results table will display the review counts and indicate any discrepancies.
+           When complete, a summary table is displayed. You can also download detailed review data as a CSV file.
     """)
     
-    # Sidebar API Credentials and Task Settings.
+    # Sidebar: API Credentials and Task Settings.
     st.sidebar.header("DataForSEO API Credentials")
     api_login = st.sidebar.text_input("API Login", type="password")
     api_password = st.sidebar.text_input("API Password", type="password")
@@ -149,7 +193,7 @@ def main():
                 continue
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 2:
-                # If there are multiple commas, assume all parts except the last form the business name.
+                # If there are multiple commas, assume that all parts except the last form the business name.
                 keyword = ", ".join(parts[:-1])
                 location = parts[-1]
             else:
@@ -163,9 +207,27 @@ def main():
         with st.spinner("Posting tasks and waiting for results..."):
             results = get_review_counts(api_login, api_password, tasks_list, depth=depth)
         if results is not None:
-            parsed = parse_results(results)
-            st.write("### Results")
-            st.table(parsed)
+            # Display summary table.
+            summary = parse_results(results)
+            st.write("### Summary Results")
+            st.table(summary)
+            
+            # Build detailed reviews DataFrame.
+            detailed_df = get_detailed_reviews_dataframe(results)
+            if not detailed_df.empty:
+                st.write("### Detailed Reviews")
+                st.dataframe(detailed_df)
+                
+                # Provide a CSV download button.
+                csv = detailed_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Detailed Reviews as CSV",
+                    data=csv,
+                    file_name='detailed_reviews.csv',
+                    mime='text/csv',
+                )
+            else:
+                st.warning("No detailed review data was found.")
         else:
             st.error("Failed to retrieve results.")
 
