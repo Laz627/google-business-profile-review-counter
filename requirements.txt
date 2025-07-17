@@ -4,3 +4,4 @@ openai
 scikit-learn 
 numpy 
 pandas
+scipy
