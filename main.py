@@ -13,12 +13,10 @@ from scipy.spatial.distance import cosine
 st.set_page_config(layout="wide", page_title="Interactive AI Review Analyzer")
 
 # --- DATA FETCHING & CORE ANALYSIS (UNCHANGED) ---
-# All functions from the previous script (get_review_counts_optimized, get_detailed_reviews_dataframe, 
-# get_embeddings, summarize_cluster_theme, analyze_reviews_with_embeddings) are included here
-# without modification, as they are required for the initial analysis. For brevity, their code is collapsed.
+# All functions from the previous script are included here without modification.
+# For brevity, their code is collapsed in this view but is present in the full script.
 
 def get_review_counts_optimized(api_login, api_password, tasks_list, depth=100):
-    # ... code from previous version ...
     client = RestClient(api_login, api_password)
     post_data = {idx: {"keyword": task["keyword"], "location_name": task["location_name"], "language_name": "English", "depth": depth} for idx, task in enumerate(tasks_list)}
     with st.status("Fetching reviews from Google...", expanded=True) as status:
@@ -48,19 +46,19 @@ def get_review_counts_optimized(api_login, api_password, tasks_list, depth=100):
     return list(completed_results.values())
 
 def get_detailed_reviews_dataframe(results):
-    # ... code from previous version ...
     detailed_rows = []
     for res in results:
         if res.get("status_code") == 20000:
             task_result = res.get("tasks", [])[0]
+            business_name = task_result.get("data", {}).get("keyword", "Unknown")
+            location_name = task_result.get("data", {}).get("location_name", "Unknown")
             items = task_result.get("result", [{}])[0].get("items", [])
             for item in items:
                 if review_body := item.get("review_text", ""):
-                    detailed_rows.append({"Business": task_result.get("data", {}).get("keyword", "Unknown"), "Rating": item.get("rating", {}).get("value"), "Review Body": review_body, "Timestamp": item.get("timestamp")})
+                    detailed_rows.append({"Business": business_name, "Location": location_name, "Rating": item.get("rating", {}).get("value"), "Review Body": review_body, "Timestamp": item.get("timestamp")})
     return pd.DataFrame(detailed_rows)
 
 def get_embeddings(api_key, texts, model="text-embedding-3-small"):
-    # ... code from previous version ...
     try:
         client = openai.OpenAI(api_key=api_key); response = client.embeddings.create(input=texts, model=model)
         return [item.embedding for item in response.data]
@@ -68,7 +66,6 @@ def get_embeddings(api_key, texts, model="text-embedding-3-small"):
         st.error(f"Failed to generate embeddings: {e}"); return None
 
 def summarize_cluster_theme(api_key, reviews_sample, model="gpt-4o-mini"):
-    # ... code from previous version ...
     prompt = f"Analyze these reviews. What is the dominant theme? Respond with a short theme name (4-6 words). Example: 'Fast and friendly customer service'.\n\nReviews:\n" + "\n".join("- " + r for r in reviews_sample)
     try:
         client = openai.OpenAI(api_key=api_key)
@@ -77,29 +74,19 @@ def summarize_cluster_theme(api_key, reviews_sample, model="gpt-4o-mini"):
     except Exception: return "Unnamed Theme"
 
 def analyze_reviews_with_embeddings(api_key, business_name, reviews_df, num_clusters=7, model="gpt-4o-mini"):
-    # ... code from previous version, but now it returns the DataFrame with embeddings ...
     if reviews_df.empty or len(reviews_df) < num_clusters:
         return business_name, {"error": "Not enough reviews for a detailed analysis."}, None
     
     review_texts = reviews_df['Review Body'].tolist()
     embeddings = get_embeddings(api_key, review_texts)
     if not embeddings: return business_name, {"error": "Could not generate embeddings."}, None
-    reviews_df['embedding'] = embeddings # Store embeddings for RAG
+    reviews_df['embedding'] = embeddings
 
     actual_clusters = min(num_clusters, len(review_texts))
     kmeans = KMeans(n_clusters=actual_clusters, random_state=42, n_init='auto')
     reviews_df['cluster'] = kmeans.fit_predict(np.array(embeddings))
     reviews_df['rating_numeric'] = pd.to_numeric(reviews_df['Rating'], errors='coerce')
-
-    # ... The rest of the function is the same, building the final JSON report ...
-    # This part is elided for brevity but is identical to the previous script
-    positive_themes, negative_themes = [], [] # ...
-    # ...
-    # final_prompt = "..."
-    # ...
-    # The return statement is key
-    # return business_name, {"prose": report_prose, "pros": positive_themes, "cons": negative_themes}, reviews_df
-    # For brevity, I'm pasting the full function logic again here
+    
     cluster_themes = {}
     with ThreadPoolExecutor(max_workers=actual_clusters) as executor:
         future_to_cluster = {executor.submit(summarize_cluster_theme, api_key, reviews_df[reviews_df['cluster'] == i]['Review Body'].head(10).tolist()): i for i in range(actual_clusters)}
@@ -124,40 +111,17 @@ def analyze_reviews_with_embeddings(api_key, business_name, reviews_df, num_clus
     except Exception as e:
         return business_name, {"error": f"Failed to generate final report: {e}"}, None
 
-
-# --- NEW Q&A FUNCTION (RAG) ---
 def answer_question_with_rag(api_key, user_question, business_reviews_df, model="gpt-4o-mini"):
-    """Answers a user's question based on relevant reviews using RAG."""
-    st.session_state['qna_answer'] = "" # Reset previous answer
-    
+    st.session_state['qna_answer'] = ""
     with st.spinner("Finding relevant reviews and generating an answer..."):
-        # Step 1 & 2: Embed question and find relevant reviews
         question_embedding = get_embeddings(api_key, [user_question])[0]
         review_embeddings = np.array(business_reviews_df['embedding'].tolist())
-        
-        # Calculate cosine similarity
         similarities = [1 - cosine(question_embedding, emb) for emb in review_embeddings]
-        
-        # Get top 7 most relevant reviews
         top_indices = np.argsort(similarities)[-7:][::-1]
         relevant_reviews = business_reviews_df.iloc[top_indices]['Review Body'].tolist()
-        
-        # Step 3 & 4: Augment prompt and generate answer
-        prompt = f"""
-        You are a helpful Q&A assistant. Based ONLY on the provided reviews below, answer the user's question.
-        If the reviews do not contain enough information to answer, you MUST explicitly state that the information is not available in the provided text. Do not make up information.
-
-        **Provided Reviews:**
-        - {"- ".join(relevant_reviews)}
-
-        **User's Question:**
-        "{user_question}"
-
-        **Answer:**
-        """
+        prompt = f"""You are a helpful Q&A assistant. Based ONLY on the provided reviews below, answer the user's question. If the reviews do not contain enough information to answer, you MUST explicitly state that the information is not available. **User's Question:** "{user_question}"\n\n**Provided Reviews:**\n- {"- ".join(relevant_reviews)}\n\n**Answer:**"""
         try:
-            client = openai.OpenAI(api_key=api_key)
-            response = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.0)
+            client = openai.OpenAI(api_key=api_key); response = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.0)
             st.session_state['qna_answer'] = response.choices[0].message.content
         except Exception as e:
             st.session_state['qna_answer'] = f"An error occurred: {e}"
@@ -166,65 +130,66 @@ def answer_question_with_rag(api_key, user_question, business_reviews_df, model=
 def main():
     st.title("Interactive AI Review Analyzer")
 
-    # Initialize session state
     if 'analysis_complete' not in st.session_state:
-        st.session_state['analysis_complete'] = False
-        st.session_state['business_data'] = {}
-        st.session_state['qna_answer'] = ""
+        st.session_state.update({'analysis_complete': False, 'business_data': {}, 'qna_answer': "", 'all_reviews_df': pd.DataFrame()})
+
+    with st.expander("🔎 How to Use This Tool", expanded=True):
+        # ... user guide text unchanged ...
+        st.markdown("""
+        This tool helps you go beyond simple star ratings to understand the ***why*** behind customer feedback. Using advanced AI, it analyzes hundreds of reviews to automatically identify key themes, assess sentiment, and provide actionable insights.
+        #### What You'll Need
+        1.  **DataForSEO:** To retrieve review data from Google. You'll need an **API Login** and **API Password**.
+        2.  **OpenAI:** To provide the AI models for analysis. You'll need an **OpenAI API Key**.
+        ---
+        #### Step-by-Step Guide
+        **1. Configure Your Analysis (in the sidebar)**
+        **2. Enter Business Profiles** (`Business Name, Location`)
+        **3. Run the Analysis & Interpret the Report**
+        **4. Ask Follow-up Questions** using the interactive Q&A section.
+        """)
+
 
     with st.sidebar:
-        # ... sidebar code is unchanged ...
         st.header("API Credentials")
         api_login = st.text_input("DataForSEO API Login", type="password")
         api_password = st.text_input("DataForSEO API Password", type="password")
         openai_api_key = st.text_input("OpenAI API Key", type="password")
         st.header("Analysis Settings")
-        depth = st.number_input("Reviews to Fetch", 100, 10000, 500, 100)
-        num_clusters = st.slider("Themes to Extract", 4, 10, 7, help="How many topics should the AI find?")
+        depth = st.number_input("Reviews to Fetch", 100, 10000, 500, 100, help="How many reviews to analyze per business?")
+        num_clusters = st.slider("Themes to Extract", 4, 10, 7, help="How many distinct topics should the AI try to find?")
 
     st.markdown("##### Enter Google Business Profiles")
-    profiles_input = st.text_area("One per line: **Business Name, Location**", height=100, placeholder="Pella Windows, Chesterfield, MO")
+    profiles_input = st.text_area("One per line: **Business Name, Location**", height=100, placeholder="Pella Windows, Chesterfield, MO\nExample Restaurant, New York, NY")
     
     if st.button("🚀 Run Advanced Analysis", use_container_width=True):
-        st.session_state['analysis_complete'] = False # Reset on new run
-        st.session_state['business_data'] = {}
-        
-        # ... data fetching and main analysis loop (same as before) ...
-        # ... except it now saves the reviews_df with embeddings to session_state
+        st.session_state.update({'analysis_complete': False, 'business_data': {}, 'all_reviews_df': pd.DataFrame()})
         if not all([api_login, api_password, openai_api_key, profiles_input.strip()]):
             st.error("Please provide all API credentials and at least one GBP profile."); return
         
         tasks_list = [{"keyword": ", ".join(p[:-1]), "location_name": p[-1]} if len(p) > 1 else {"keyword": p[0], "location_name": "United States"} for line in profiles_input.strip().splitlines() if (p := [part.strip() for part in line.split(",")])]
         results = get_review_counts_optimized(api_login, api_password, tasks_list, depth)
-        if not results: st.error("Failed to retrieve data."); return
+        if not results: st.error("Failed to retrieve data from DataForSEO."); return
+        
         all_reviews_df = get_detailed_reviews_dataframe(results)
         if all_reviews_df.empty: st.warning("No reviews with text content were found."); return
+        st.session_state['all_reviews_df'] = all_reviews_df
 
-        st.markdown("---")
-        st.header("🤖 AI Analysis Reports")
-        business_dfs = {name: group for name, group in all_reviews_df.groupby('Business')}
-        
-        with st.spinner(f"Analyzing {len(business_dfs)} businesses concurrently..."):
+        st.markdown("---"); st.header("🤖 AI Analysis Reports")
+        with st.spinner(f"Analyzing reviews for {len(tasks_list)} businesses..."):
             with ThreadPoolExecutor(max_workers=10) as executor:
-                future_to_business = {executor.submit(analyze_reviews_with_embeddings, openai_api_key, name, df.copy(), num_clusters): name for name, df in business_dfs.items()}
+                future_to_business = {executor.submit(analyze_reviews_with_embeddings, openai_api_key, name, df.copy(), num_clusters): name for name, df in all_reviews_df.groupby('Business')}
                 for future in as_completed(future_to_business):
                     business_name, report_data, reviews_with_embeddings_df = future.result()
-                    
-                    # Store data for Q&A
                     if reviews_with_embeddings_df is not None:
-                        st.session_state['business_data'][business_name] = {
-                            "report": report_data,
-                            "reviews_df": reviews_with_embeddings_df
-                        }
+                        st.session_state['business_data'][business_name] = {"report": report_data, "reviews_df": reviews_with_embeddings_df}
         st.session_state['analysis_complete'] = True
 
-    if st.session_state['analysis_complete']:
+    if st.session_state.get('analysis_complete'):
         # --- Display Reports ---
         for business_name, data in st.session_state['business_data'].items():
             report_data = data['report']
             with st.container(border=True):
                 st.subheader(f"Analysis for: {business_name}")
-                # ... same report display logic as before ...
                 if "error" in report_data: st.error(report_data["error"]); continue
                 prose = report_data.get("prose", {}); st.markdown("##### Executive Summary"); st.write(prose.get("summary", "N/A")); st.divider()
                 st.markdown("##### Dominant Positive Themes (Pros)");
@@ -241,28 +206,34 @@ def main():
                 st.markdown("##### Strategic Recommendation"); st.success(f"**Recommendation:** {prose.get('recommendation', 'N/A')}")
 
         # --- Interactive Q&A Section ---
-        st.markdown("---")
-        st.header("💬 Ask a Follow-up Question")
-        
+        st.markdown("---"); st.header("💬 Ask a Follow-up Question")
         business_options = list(st.session_state['business_data'].keys())
-        if not business_options:
-            st.warning("Run an analysis first to enable the Q&A feature.")
-        else:
+        if business_options:
             selected_business = st.selectbox("Select a business to ask about:", business_options)
             user_question = st.text_input("Enter your question:", placeholder="e.g., How was the customer service?")
-
             if st.button("Get Answer", key="qna_button"):
                 if user_question and selected_business:
-                    answer_question_with_rag(
-                        openai_api_key,
-                        user_question,
-                        st.session_state['business_data'][selected_business]['reviews_df']
-                    )
+                    answer_question_with_rag(openai_api_key, user_question, st.session_state['business_data'][selected_business]['reviews_df'])
                 else:
                     st.error("Please select a business and enter a question.")
+            if st.session_state.get('qna_answer'): st.info(st.session_state['qna_answer'])
         
-        if st.session_state.get('qna_answer'):
-            st.info(st.session_state['qna_answer'])
+        # --- NEW: DETAILED DATA EXPORT SECTION ---
+        st.markdown("---")
+        with st.expander("📄 View and Export All Fetched Review Data"):
+            display_df = st.session_state.get('all_reviews_df', pd.DataFrame())
+            if not display_df.empty:
+                st.dataframe(display_df)
+                csv = display_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download All Reviews as CSV",
+                    data=csv,
+                    file_name='all_customer_reviews.csv',
+                    mime='text/csv',
+                )
+            else:
+                st.write("No data available to display.")
+
 
 if __name__ == "__main__":
     main()
