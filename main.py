@@ -2,32 +2,11 @@ import time
 import streamlit as st
 import pandas as pd
 from client import RestClient
-import nltk
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from collections import Counter
+import openai  # Import the OpenAI library
 
-# --- NLTK Setup ---
-# Download required NLTK data files if not already present.
-# This is done once and the results are cached.
-@st.cache_resource
-def download_nltk_data():
-    try:
-        nltk.data.find('sentiment/vader_lexicon.zip')
-    except LookupError:
-        nltk.download('vader_lexicon')
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt')
-    try:
-        nltk.data.find('corpora/stopwords')
-    except LookupError:
-        nltk.download('stopwords')
-
-# Call the function to ensure data is downloaded
-download_nltk_data()
+# --- OpenAI Client Setup ---
+# The API key is handled via the Streamlit sidebar input
+# No global client is instantiated here to allow key entry in the UI
 
 def get_review_counts(api_login, api_password, tasks_list, depth=100):
     """
@@ -118,13 +97,6 @@ def parse_results(results):
 def get_detailed_reviews_dataframe(results):
     """
     For each completed task result, extract the individual review items and build a DataFrame.
-    The DataFrame will include:
-      - Business (the 'keyword' from the task data)
-      - Location (the 'location_name' from the task data)
-      - Timestamp (when the review was posted)
-      - Profile Name (who posted the review)
-      - Rating (the review's rating value)
-      - Review Body (the text content of the review)
     """
     detailed_rows = []
     for res in results:
@@ -140,226 +112,160 @@ def get_detailed_reviews_dataframe(results):
                 for item in items:
                     timestamp = item.get("timestamp", "")
                     profile_name = item.get("profile_name", "")
-                    rating = ""
-                    if item.get("rating") and isinstance(item["rating"], dict):
-                        rating = item["rating"].get("value", "")
+                    rating_value = item.get("rating", {}).get("value", "") if isinstance(item.get("rating"), dict) else ""
                     review_body = item.get("review_text", "")
-                    detailed_rows.append({
-                        "Business": business,
-                        "Location": location,
-                        "Timestamp": timestamp,
-                        "Profile Name": profile_name,
-                        "Rating": rating,
-                        "Review Body": review_body
-                    })
+                    
+                    # Only include reviews with text for analysis
+                    if review_body:
+                        detailed_rows.append({
+                            "Business": business,
+                            "Location": location,
+                            "Timestamp": timestamp,
+                            "Profile Name": profile_name,
+                            "Rating": rating_value,
+                            "Review Body": review_body
+                        })
     if detailed_rows:
         return pd.DataFrame(detailed_rows)
-    else:
-        return pd.DataFrame()
+    return pd.DataFrame()
 
-def analyze_reviews(df):
+def analyze_reviews_with_gpt(api_key, reviews_df, model="gpt-4o-mini"):
     """
-    Performs sentiment analysis on the 'Review Body' column and extracts
-    common themes for pros and cons.
+    Analyzes reviews using an OpenAI model to generate a summary, pros, cons, and sentiment.
     """
-    if df.empty or 'Review Body' not in df.columns:
-        return None
+    if reviews_df.empty:
+        return "No reviews with text content were found to analyze."
 
-    sid = SentimentIntensityAnalyzer()
+    # Concatenate reviews into a single block of text
+    # We include ratings to give the model more context
+    reviews_text = "\n---\n".join(
+        f"Rating: {row['Rating']}/5\nReview: {row['Review Body']}"
+        for _, row in reviews_df.iterrows()
+    )
+
+    # Initialize OpenAI client
+    try:
+        client = openai.OpenAI(api_key=api_key)
+    except Exception as e:
+        return f"Error initializing OpenAI client: {e}"
+
+    # Construct the prompt for the generative model
+    prompt = f"""
+    You are a business analyst specialized in customer feedback. Analyze the following customer reviews for a business.
+    Based *only* on the information in these reviews, provide the following in clear, well-structured markdown format:
+
+    1.  **Overall Sentiment**: A single word (e.g., Positive, Negative, Mixed).
+    2.  **Executive Summary**: A concise, 2-3 sentence paragraph summarizing the key takeaways from the customer feedback.
+    3.  **Strong Pros**: A bulleted list of the 3-5 most common positive themes or compliments.
+    4.  **Key Cons**: A bulleted list of the 3-5 most common negative themes or complaints.
+    5.  **Final Recommendation**: A concluding sentence to help a potential customer decide if they should do business here based on the reviews.
+
+    Here are the reviews:
+    ---
+    {reviews_text}
+    ---
+    """
     
-    # Calculate sentiment for each review
-    df['sentiment'] = df['Review Body'].apply(lambda review: sid.polarity_scores(str(review))['compound'])
-    
-    # Classify reviews
-    df['sentiment_type'] = df['sentiment'].apply(lambda score: 'Positive' if score >= 0.05 else ('Negative' if score <= -0.05 else 'Neutral'))
-    
-    # Overall sentiment
-    average_sentiment = df['sentiment'].mean()
-    if average_sentiment >= 0.05:
-        overall_sentiment = "Positive"
-    elif average_sentiment <= -0.05:
-        overall_sentiment = "Negative"
-    else:
-        overall_sentiment = "Neutral"
-
-    # Extract common words from positive and negative reviews
-    stop_words = set(stopwords.words('english'))
-    
-    def get_common_phrases(text_series, top_n=10):
-        # Ensure all items are strings before processing
-        all_text = ' '.join(str(s) for s in text_series if str(s).strip())
-        if not all_text:
-            return []
-        
-        words = word_tokenize(all_text.lower())
-        # Filter out stopwords and non-alphabetic characters
-        filtered_words = [word for word in words if word.isalpha() and word not in stop_words and len(word) > 2]
-        return [word for word, count in Counter(filtered_words).most_common(top_n)]
-
-    positive_reviews = df[df['sentiment_type'] == 'Positive']['Review Body']
-    negative_reviews = df[df['sentiment_type'] == 'Negative']['Review Body']
-
-    pros = get_common_phrases(positive_reviews)
-    cons = get_common_phrases(negative_reviews)
-
-    return {
-        "overall_sentiment": overall_sentiment,
-        "average_score": f"{average_sentiment:.2f}",
-        "sentiment_distribution": df['sentiment_type'].value_counts(normalize=True).to_dict(),
-        "pros": pros,
-        "cons": cons,
-    }
-
+    try:
+        st.info(f"Sending {len(reviews_df)} reviews to {model} for analysis...")
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful business review analyst."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3, # Lower temperature for more factual, less creative output
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"An error occurred while communicating with the OpenAI API: {e}"
 
 def main():
-    st.title("Google Reviews Analyzer for GBP Profiles")
+    st.title("Generative AI Google Reviews Analyzer")
     st.markdown("""
         **Overview:**  
-        This tool uses the DataForSEO API to fetch, analyze, and summarize reviews for your Google Business Profiles (GBP).
-        It provides sentiment analysis, a list of pros and cons, and an overall summary to help you assess customer feedback.
+        This tool uses DataForSEO to fetch Google reviews and **OpenAI's GPT model** to perform an in-depth analysis.
+        It delivers a human-like summary, identifies key pros and cons, and assesses overall sentiment to provide actionable business insights.
         
         **How to Use:**  
-        1. **Enter Your DataForSEO Credentials** in the sidebar.  
-        2. **Enter GBP Profiles:** Provide one GBP profile per line in the format:  
-           **Business Name, Location**  
-           For example:  
-           ```
-           Pella Windows and Doors Showroom of Chesterfield, MO, United States
-           Pella Windows and Doors Showroom of Bentonville, AR, United States
-           ```  
-        3. **Processing Time:**  
-           Tasks may take **2–5 minutes**. The elapsed time is shown during processing.  
-        4. **Results:**  
-           A summary table, detailed review data, and a full analysis with sentiment, pros, and cons will be displayed.
+        1.  **Enter API Credentials** in the sidebar (DataForSEO and OpenAI).
+        2.  **Enter GBP Profiles** one per line: **Business Name, Location**.
+        3.  **Run Analysis:** Processing takes **2–5 minutes**.
+        4.  **Get Results:** Review the AI-generated analysis for each business.
     """)
     
-    # Sidebar: API Credentials and Task Settings.
-    st.sidebar.header("DataForSEO API Credentials")
-    api_login = st.sidebar.text_input("API Login", type="password")
-    api_password = st.sidebar.text_input("API Password", type="password")
+    # --- Sidebar Setup ---
+    st.sidebar.header("API Credentials")
+    api_login = st.sidebar.text_input("DataForSEO API Login", type="password")
+    api_password = st.sidebar.text_input("DataForSEO API Password", type="password")
+    openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
     
     st.sidebar.header("Task Settings")
-    depth = st.sidebar.number_input("Depth (number of reviews to fetch)", min_value=10, max_value=10000, value=100, step=10)
+    depth = st.sidebar.number_input("Depth (reviews to fetch)", min_value=10, max_value=1000, value=100, step=10)
     
     st.markdown("### Enter Your GBP Profiles")
-    st.markdown("""
-        **Format:** One GBP profile per line in the format:  
-        **Business Name, Location**
-    """)
+    profiles_input = st.text_area(
+        "GBP Profiles (one per line)", 
+        height=120, 
+        placeholder="Pella Windows and Doors, Chesterfield, MO, United States"
+    )
     
-    profiles_input = st.text_area("GBP Profiles", height=150, placeholder="Business Name, Location")
-    
-    if st.button("Run Review Analysis"):
-        if not api_login or not api_password:
-            st.error("Please enter your API credentials in the sidebar.")
+    if st.button("Run Generative AI Analysis"):
+        if not all([api_login, api_password, openai_api_key]):
+            st.error("Please enter all API credentials in the sidebar.")
             return
         if not profiles_input.strip():
             st.error("Please enter at least one GBP profile.")
             return
         
-        # Parse the input into a list of tasks.
+        # Parse input into tasks
         tasks_list = []
-        lines = profiles_input.splitlines()
-        for line in lines:
-            if not line.strip():
-                continue
+        for line in profiles_input.strip().splitlines():
+            if not line.strip(): continue
             parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2:
-                keyword = ", ".join(parts[:-1])
-                location = parts[-1]
-            else:
-                keyword = parts[0]
-                location = "United States"
-            tasks_list.append({
-                "keyword": keyword,
-                "location_name": location
-            })
+            keyword, location = (", ".join(parts[:-1]), parts[-1]) if len(parts) > 1 else (parts[0], "United States")
+            tasks_list.append({"keyword": keyword, "location_name": location})
         
-        with st.spinner("Posting tasks and waiting for results..."):
+        # --- Data Fetching ---
+        with st.spinner("Fetching reviews from DataForSEO..."):
             results = get_review_counts(api_login, api_password, tasks_list, depth=depth)
         
-        if results:
-            st.success("Tasks completed. Generating analysis...")
+        if not results:
+            st.error("Failed to retrieve review data. Please check credentials or task settings.")
+            return
+
+        st.success("Review data fetched. Preparing for analysis.")
+        detailed_df = get_detailed_reviews_dataframe(results)
+
+        if detailed_df.empty:
+            st.warning("No reviews with text content were found to analyze.")
+            return
+
+        # --- Analysis and Display ---
+        st.markdown("---")
+        st.header("AI-Powered Review Analysis")
+
+        for business_name in detailed_df['Business'].unique():
+            st.subheader(f"Analysis for: {business_name}")
+            business_df = detailed_df[detailed_df['Business'] == business_name].copy()
             
-            # Display summary table.
-            summary = parse_results(results)
-            st.write("### Scrape Summary")
-            st.table(summary)
+            with st.spinner(f"Analyzing reviews for {business_name} with GPT..."):
+                analysis_result = analyze_reviews_with_gpt(openai_api_key, business_df)
             
-            # Build detailed reviews DataFrame.
-            detailed_df = get_detailed_reviews_dataframe(results)
-            
-            if not detailed_df.empty:
-                # --- Analysis Section ---
-                st.markdown("---")
-                st.header("Review Analysis")
+            st.markdown(analysis_result)
 
-                # Analyze each business separately
-                for business_name in detailed_df['Business'].unique():
-                    st.subheader(f"Analysis for: {business_name}")
-                    business_df = detailed_df[detailed_df['Business'] == business_name]
-                    
-                    analysis = analyze_reviews(business_df)
-
-                    if analysis:
-                        # Overall Sentiment
-                        st.metric(label="Overall Sentiment", value=analysis['overall_sentiment'])
-                        
-                        # Pros and Cons
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown("#### Pros 👍")
-                            if analysis['pros']:
-                                for pro in analysis['pros']:
-                                    st.markdown(f"- {pro.capitalize()}")
-                            else:
-                                st.markdown("No significant positive themes found.")
-                        
-                        with col2:
-                            st.markdown("#### Cons 👎")
-                            if analysis['cons']:
-                                for con in analysis['cons']:
-                                    st.markdown(f"- {con.capitalize()}")
-                            else:
-                                st.markdown("No significant negative themes found.")
-                        
-                        # Final Summary
-                        st.markdown("#### Summary & Recommendation")
-                        num_reviews = len(business_df)
-                        avg_rating = pd.to_numeric(business_df['Rating'], errors='coerce').mean()
-                        
-                        summary_text = f"""
-                        Based on the analysis of **{num_reviews}** reviews with an average rating of **{avg_rating:.2f} stars**, 
-                        the sentiment towards **{business_name}** is generally **{analysis['overall_sentiment']}**.
-
-                        Key positive themes include **{', '.join(analysis['pros'][:3])}**. 
-                        However, some customers have raised concerns about **{', '.join(analysis['cons'][:3])}**.
-
-                        **Recommendation:** Potential customers should feel confident, particularly if the positive aspects align with their priorities. 
-                        It may be wise to inquire about the common issues mentioned to ensure a smooth experience.
-                        """
-                        st.info(summary_text)
-
-                    else:
-                        st.warning(f"Could not generate an analysis for {business_name}. Not enough review text available.")
-                
-                # --- Detailed Data Section ---
-                st.markdown("---")
-                st.header("Detailed Review Data")
-                st.dataframe(detailed_df)
-                
-                # Provide a CSV download button.
-                csv = detailed_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download Detailed Reviews as CSV",
-                    data=csv,
-                    file_name='detailed_reviews.csv',
-                    mime='text/csv',
-                )
-            else:
-                st.warning("No detailed review data was found.")
-        else:
-            st.error("Failed to retrieve results from the API.")
+        # --- Data Download Section ---
+        st.markdown("---")
+        if not detailed_df.empty:
+            st.header("Detailed Review Data")
+            st.dataframe(detailed_df)
+            csv = detailed_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "Download Detailed Reviews as CSV",
+                csv,
+                "detailed_reviews.csv",
+                "text/csv"
+            )
 
 if __name__ == "__main__":
     main()
