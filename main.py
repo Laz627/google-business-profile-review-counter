@@ -1,7 +1,33 @@
 import time
 import streamlit as st
 import pandas as pd
-from client import RestClient  # Ensure that client.py (DataForSEO client) is in your repository
+from client import RestClient
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from collections import Counter
+
+# --- NLTK Setup ---
+# Download required NLTK data files if not already present.
+# This is done once and the results are cached.
+@st.cache_resource
+def download_nltk_data():
+    try:
+        nltk.data.find('sentiment/vader_lexicon.zip')
+    except LookupError:
+        nltk.download('vader_lexicon')
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+
+# Call the function to ensure data is downloaded
+download_nltk_data()
 
 def get_review_counts(api_login, api_password, tasks_list, depth=100):
     """
@@ -109,7 +135,6 @@ def get_detailed_reviews_dataframe(results):
             location = task_params.get("location_name", "Unknown")
             results_array = task_result.get("result", [])
             if results_array:
-                # Assume the first element contains aggregated data and individual reviews in "items"
                 review_info = results_array[0]
                 items = review_info.get("items", [])
                 for item in items:
@@ -132,13 +157,66 @@ def get_detailed_reviews_dataframe(results):
     else:
         return pd.DataFrame()
 
+def analyze_reviews(df):
+    """
+    Performs sentiment analysis on the 'Review Body' column and extracts
+    common themes for pros and cons.
+    """
+    if df.empty or 'Review Body' not in df.columns:
+        return None
+
+    sid = SentimentIntensityAnalyzer()
+    
+    # Calculate sentiment for each review
+    df['sentiment'] = df['Review Body'].apply(lambda review: sid.polarity_scores(str(review))['compound'])
+    
+    # Classify reviews
+    df['sentiment_type'] = df['sentiment'].apply(lambda score: 'Positive' if score >= 0.05 else ('Negative' if score <= -0.05 else 'Neutral'))
+    
+    # Overall sentiment
+    average_sentiment = df['sentiment'].mean()
+    if average_sentiment >= 0.05:
+        overall_sentiment = "Positive"
+    elif average_sentiment <= -0.05:
+        overall_sentiment = "Negative"
+    else:
+        overall_sentiment = "Neutral"
+
+    # Extract common words from positive and negative reviews
+    stop_words = set(stopwords.words('english'))
+    
+    def get_common_phrases(text_series, top_n=10):
+        # Ensure all items are strings before processing
+        all_text = ' '.join(str(s) for s in text_series if str(s).strip())
+        if not all_text:
+            return []
+        
+        words = word_tokenize(all_text.lower())
+        # Filter out stopwords and non-alphabetic characters
+        filtered_words = [word for word in words if word.isalpha() and word not in stop_words and len(word) > 2]
+        return [word for word, count in Counter(filtered_words).most_common(top_n)]
+
+    positive_reviews = df[df['sentiment_type'] == 'Positive']['Review Body']
+    negative_reviews = df[df['sentiment_type'] == 'Negative']['Review Body']
+
+    pros = get_common_phrases(positive_reviews)
+    cons = get_common_phrases(negative_reviews)
+
+    return {
+        "overall_sentiment": overall_sentiment,
+        "average_score": f"{average_sentiment:.2f}",
+        "sentiment_distribution": df['sentiment_type'].value_counts(normalize=True).to_dict(),
+        "pros": pros,
+        "cons": cons,
+    }
+
+
 def main():
-    st.title("Google Reviews Checker for GBP Profiles")
+    st.title("Google Reviews Analyzer for GBP Profiles")
     st.markdown("""
         **Overview:**  
-        This tool leverages the DataForSEO API to retrieve review counts and detailed review data for your Google Business Profiles (GBP).  
-        It shows both the total review count (as listed on Google) and the number of reviews scraped from the page.  
-        Additionally, you can download the individual review details as a CSV file for further analysis.  
+        This tool uses the DataForSEO API to fetch, analyze, and summarize reviews for your Google Business Profiles (GBP).
+        It provides sentiment analysis, a list of pros and cons, and an overall summary to help you assess customer feedback.
         
         **How to Use:**  
         1. **Enter Your DataForSEO Credentials** in the sidebar.  
@@ -149,12 +227,10 @@ def main():
            Pella Windows and Doors Showroom of Chesterfield, MO, United States
            Pella Windows and Doors Showroom of Bentonville, AR, United States
            ```  
-           *Ensure the business name is entered exactly as it appears in your Google Business Profile for accurate results.*  
         3. **Processing Time:**  
-           The API tasks are processed asynchronously and may take **2–5 minutes** (or longer if you set a high review depth).  
-           The elapsed time is shown during processing.  
+           Tasks may take **2–5 minutes**. The elapsed time is shown during processing.  
         4. **Results:**  
-           When complete, a summary table is displayed. You can also download detailed review data (including review text) as a CSV file.
+           A summary table, detailed review data, and a full analysis with sentiment, pros, and cons will be displayed.
     """)
     
     # Sidebar: API Credentials and Task Settings.
@@ -168,19 +244,12 @@ def main():
     st.markdown("### Enter Your GBP Profiles")
     st.markdown("""
         **Format:** One GBP profile per line in the format:  
-        **Business Name, Location**  
-        
-        **Example:**  
-        ```
-        Pella Windows and Doors Showroom of Chesterfield, MO, United States
-        Pella Windows and Doors Showroom of Bentonville, AR, United States
-        ```  
-        If you enter only a business name, a default location of 'United States' will be assumed.
+        **Business Name, Location**
     """)
     
-    profiles_input = st.text_area("GBP Profiles", height=150)
+    profiles_input = st.text_area("GBP Profiles", height=150, placeholder="Business Name, Location")
     
-    if st.button("Run Review Check"):
+    if st.button("Run Review Analysis"):
         if not api_login or not api_password:
             st.error("Please enter your API credentials in the sidebar.")
             return
@@ -196,12 +265,11 @@ def main():
                 continue
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 2:
-                # If there are multiple commas, assume that all parts except the last form the business name.
                 keyword = ", ".join(parts[:-1])
                 location = parts[-1]
             else:
                 keyword = parts[0]
-                location = "United States"  # Default location if not specified.
+                location = "United States"
             tasks_list.append({
                 "keyword": keyword,
                 "location_name": location
@@ -209,16 +277,75 @@ def main():
         
         with st.spinner("Posting tasks and waiting for results..."):
             results = get_review_counts(api_login, api_password, tasks_list, depth=depth)
-        if results is not None:
+        
+        if results:
+            st.success("Tasks completed. Generating analysis...")
+            
             # Display summary table.
             summary = parse_results(results)
-            st.write("### Summary Results")
+            st.write("### Scrape Summary")
             st.table(summary)
             
             # Build detailed reviews DataFrame.
             detailed_df = get_detailed_reviews_dataframe(results)
+            
             if not detailed_df.empty:
-                st.write("### Detailed Reviews")
+                # --- Analysis Section ---
+                st.markdown("---")
+                st.header("Review Analysis")
+
+                # Analyze each business separately
+                for business_name in detailed_df['Business'].unique():
+                    st.subheader(f"Analysis for: {business_name}")
+                    business_df = detailed_df[detailed_df['Business'] == business_name]
+                    
+                    analysis = analyze_reviews(business_df)
+
+                    if analysis:
+                        # Overall Sentiment
+                        st.metric(label="Overall Sentiment", value=analysis['overall_sentiment'])
+                        
+                        # Pros and Cons
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("#### Pros 👍")
+                            if analysis['pros']:
+                                for pro in analysis['pros']:
+                                    st.markdown(f"- {pro.capitalize()}")
+                            else:
+                                st.markdown("No significant positive themes found.")
+                        
+                        with col2:
+                            st.markdown("#### Cons 👎")
+                            if analysis['cons']:
+                                for con in analysis['cons']:
+                                    st.markdown(f"- {con.capitalize()}")
+                            else:
+                                st.markdown("No significant negative themes found.")
+                        
+                        # Final Summary
+                        st.markdown("#### Summary & Recommendation")
+                        num_reviews = len(business_df)
+                        avg_rating = pd.to_numeric(business_df['Rating'], errors='coerce').mean()
+                        
+                        summary_text = f"""
+                        Based on the analysis of **{num_reviews}** reviews with an average rating of **{avg_rating:.2f} stars**, 
+                        the sentiment towards **{business_name}** is generally **{analysis['overall_sentiment']}**.
+
+                        Key positive themes include **{', '.join(analysis['pros'][:3])}**. 
+                        However, some customers have raised concerns about **{', '.join(analysis['cons'][:3])}**.
+
+                        **Recommendation:** Potential customers should feel confident, particularly if the positive aspects align with their priorities. 
+                        It may be wise to inquire about the common issues mentioned to ensure a smooth experience.
+                        """
+                        st.info(summary_text)
+
+                    else:
+                        st.warning(f"Could not generate an analysis for {business_name}. Not enough review text available.")
+                
+                # --- Detailed Data Section ---
+                st.markdown("---")
+                st.header("Detailed Review Data")
                 st.dataframe(detailed_df)
                 
                 # Provide a CSV download button.
@@ -232,7 +359,7 @@ def main():
             else:
                 st.warning("No detailed review data was found.")
         else:
-            st.error("Failed to retrieve results.")
+            st.error("Failed to retrieve results from the API.")
 
 if __name__ == "__main__":
     main()
